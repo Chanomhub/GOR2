@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-contrib/cors"
 	"github.com/joho/godotenv"
 	"github.com/meblum/turnstile"
 	_ "golang.org/x/image/webp"
@@ -96,6 +97,12 @@ func main() {
 	s3Client = uploader.Client
 
 	router := gin.Default()
+
+	// CORS middleware
+	config := cors.DefaultConfig()
+	config.AllowOrigins = []string{"http://localhost:3000"}
+	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	router.Use(cors.New(config))
 
 	router.GET("/health", healthCheckHandler)
 	router.POST("/upload", uploadHandler)
