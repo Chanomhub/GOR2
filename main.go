@@ -113,7 +113,8 @@ func healthCheckHandler(c *gin.Context) {
 func uploadHandler(c *gin.Context) {
 	// Turnstile verification
 	token := c.PostForm("cf-turnstile-response")
-	verified, err := turnstile.Verify(token, turnstileSecretKey, "")
+	verifier := turnstile.NewVerifier(turnstileSecretKey, nil)
+	verified, err := verifier.Verify(token, c.ClientIP(), "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Turnstile verification failed"})
 		return
