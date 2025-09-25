@@ -11,7 +11,6 @@ require (
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.11.0
 	github.com/joho/godotenv v1.5.1
-	github.com/meblum/turnstile v1.0.0
 	golang.org/x/image v0.31.0
 )
 
