@@ -25,6 +25,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/meblum/turnstile"
 	_ "golang.org/x/image/webp"
 )
 
@@ -33,12 +34,13 @@ const (
 )
 
 var (
-	r2AccountID       = getEnv("R2_ACCOUNT_ID", "")
-	r2AccessKeyID     = getEnv("R2_ACCESS_KEY_ID", "")
-	r2SecretAccessKey = getEnv("R2_SECRET_ACCESS_KEY", "")
-	r2BucketName      = getEnv("R2_BUCKET_NAME", "")
-	r2PublicURL       = getEnv("R2_PUBLIC_URL", "")
-	s3Client          *s3.Client
+	r2AccountID        = getEnv("R2_ACCOUNT_ID", "")
+	r2AccessKeyID      = getEnv("R2_ACCESS_KEY_ID", "")
+	r2SecretAccessKey  = getEnv("R2_SECRET_ACCESS_KEY", "")
+	r2BucketName       = getEnv("R2_BUCKET_NAME", "")
+	r2PublicURL        = getEnv("R2_PUBLIC_URL", "")
+	turnstileSecretKey = getEnv("TURNSTILE_SECRET_KEY", "")
+	s3Client           *s3.Client
 )
 
 // R2Uploader struct holds the S3 client
@@ -80,6 +82,7 @@ func main() {
 	r2SecretAccessKey = getEnv("R2_SECRET_ACCESS_KEY", "")
 	r2BucketName = getEnv("R2_BUCKET_NAME", "")
 	r2PublicURL = getEnv("R2_PUBLIC_URL", "")
+	turnstileSecretKey = getEnv("TURNSTILE_SECRET_KEY", "")
 
 	// Check for required environment variables
 	if r2AccountID == "" || r2AccessKeyID == "" || r2SecretAccessKey == "" || r2BucketName == "" || r2PublicURL == "" {
@@ -108,6 +111,18 @@ func healthCheckHandler(c *gin.Context) {
 }
 
 func uploadHandler(c *gin.Context) {
+	// Turnstile verification
+	token := c.PostForm("cf-turnstile-response")
+	verified, err := turnstile.Verify(token, turnstileSecretKey, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Turnstile verification failed"})
+		return
+	}
+	if !verified.Success {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Turnstile verification failed"})
+		return
+	}
+
 	file, header, err := c.Request.FormFile("image")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Image file is required"})
