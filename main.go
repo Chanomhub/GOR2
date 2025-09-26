@@ -23,8 +23,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
-	"github.com/gin-gonic/gin"
 	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/h2non/filetype"
 	"github.com/joho/godotenv"
 	_ "golang.org/x/image/webp"
 )
@@ -135,34 +136,30 @@ func uploadHandler(c *gin.Context) {
 		return
 	}
 	fileBytes := buf.Bytes()
-	fileReader := bytes.NewReader(fileBytes)
 
 	// Security Check: Validate that it's a real image file by decoding its config
-	allowedExts := map[string]bool{".jpeg": true, ".jpg": true, ".png": true, ".gif": true, ".webp": true}
+	allowedExts := map[string]bool{".jpeg": true, ".jpg": true, ".png": true, ".gif": true, ".webp": true, ".avif": true}
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if !allowedExts[ext] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Allowed types: JPEG, PNG, GIF, WebP"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Allowed types: JPEG, PNG, GIF, WebP, AVIF"})
 		return
 	}
 
 	// Check magic number to validate file type
-	sniffer := make([]byte, 512)
-	if _, err := fileReader.Read(sniffer); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file for magic number sniffing"})
+	kind, _ := filetype.Match(fileBytes)
+	if kind == filetype.Unknown {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown file type"})
 		return
 	}
-	detectedContentType := http.DetectContentType(sniffer)
+
 	expectedContentType := getContentType(ext)
-	if !strings.HasPrefix(detectedContentType, "image/") || expectedContentType != detectedContentType {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File is pretending to be a %s but is actually a %s", ext, detectedContentType)})
+	if kind.MIME.Value != expectedContentType {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File is pretending to be a %s but is actually a %s", ext, kind.MIME.Value)})
 		return
 	}
 
 	// Reset buffer after reading for magic number
-	if _, err := fileReader.Seek(0, 0); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset file buffer"})
-		return
-	}
+	fileReader := bytes.NewReader(fileBytes)
 
 	_, _, err = image.DecodeConfig(fileReader)
 	if err != nil {
@@ -228,6 +225,8 @@ func getContentType(ext string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".avif":
+		return "image/avif"
 	default:
 		return "application/octet-stream"
 	}

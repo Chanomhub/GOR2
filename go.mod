@@ -10,6 +10,7 @@ require (
 	github.com/aws/smithy-go v1.23.0
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.11.0
+	github.com/h2non/filetype v1.1.3
 	github.com/joho/godotenv v1.5.1
 	golang.org/x/image v0.31.0
 )
