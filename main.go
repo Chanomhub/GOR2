@@ -152,8 +152,9 @@ func uploadHandler(c *gin.Context) {
 		return
 	}
 	detectedContentType := http.DetectContentType(sniffer)
-	if !strings.HasPrefix(detectedContentType, "image/") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file content type"})
+	expectedContentType := getContentType(ext)
+	if !strings.HasPrefix(detectedContentType, "image/") || expectedContentType != detectedContentType {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File is pretending to be a %s but is actually a %s", ext, detectedContentType)})
 		return
 	}
 
