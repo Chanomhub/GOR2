@@ -134,6 +134,8 @@ func uploadHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file buffer"})
 		return
 	}
+	fileBytes := buf.Bytes()
+	fileReader := bytes.NewReader(fileBytes)
 
 	// Security Check: Validate that it's a real image file by decoding its config
 	allowedExts := map[string]bool{".jpeg": true, ".jpg": true, ".png": true, ".gif": true, ".webp": true}
@@ -143,14 +145,32 @@ func uploadHandler(c *gin.Context) {
 		return
 	}
 
-	_, _, err = image.DecodeConfig(bytes.NewReader(buf.Bytes()))
+	// Check magic number to validate file type
+	sniffer := make([]byte, 512)
+	if _, err := fileReader.Read(sniffer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file for magic number sniffing"})
+		return
+	}
+	detectedContentType := http.DetectContentType(sniffer)
+	if !strings.HasPrefix(detectedContentType, "image/") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file content type"})
+		return
+	}
+
+	// Reset buffer after reading for magic number
+	if _, err := fileReader.Seek(0, 0); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset file buffer"})
+		return
+	}
+
+	_, _, err = image.DecodeConfig(fileReader)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid image file: not a valid image or format is corrupted"})
 		return
 	}
 
 	// Deduplication Check: Calculate SHA-256 hash of the file content
-	hash := sha256.Sum256(buf.Bytes())
+	hash := sha256.Sum256(fileBytes)
 	hashString := hex.EncodeToString(hash[:])
 	newFileName := fmt.Sprintf("%s%s", hashString, ext)
 
@@ -171,7 +191,6 @@ func uploadHandler(c *gin.Context) {
 	var apiError smithy.APIError
 	if !errors.As(err, &apiError) || apiError.ErrorCode() != "NotFound" {
 		// An actual error occurred during HeadObject
-		log.Printf("Failed to check for object in R2: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check for file existence"})
 		return
 	}
@@ -183,12 +202,11 @@ func uploadHandler(c *gin.Context) {
 	_, err = s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket:      aws.String(r2BucketName),
 		Key:         aws.String(newFileName),
-		Body:        bytes.NewReader(buf.Bytes()),
-		ContentType: aws.String(contentType), // เพิ่มบรรทัดนี้
+		Body:        bytes.NewReader(fileBytes),
+		ContentType: aws.String(contentType),
 		ACL:         "public-read",
 	})
 	if err != nil {
-		log.Printf("Failed to upload to R2: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file"})
 		return
 	}
