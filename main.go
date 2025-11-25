@@ -98,7 +98,7 @@ func main() {
 
 	// CORS middleware
 	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"http://localhost:3000", "https://chanomhub.online"}
+	config.AllowOrigins = []string{"http://localhost:3000", "https://chanomhub.online", "https://chanomhub.com"}
 	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
 	router.Use(cors.New(config))
 
