@@ -97,10 +97,18 @@ func main() {
 	router := gin.Default()
 
 	// CORS middleware
-	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"http://localhost:3000", "https://chanomhub.online", "https://chanomhub.com"}
-	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	router.Use(cors.New(config))
+    config := cors.DefaultConfig()
+    config.AllowOrigins = []string{
+        "http://localhost:3000",
+        "https://chanomhub.online",
+        "https://chanomhub.com",
+        "https://www.chanomhub.online",
+        "https://www.chanomhub.com",
+    }
+    config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+    config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
+    config.AllowCredentials = true
+    router.Use(cors.New(config))
 
 	router.GET("/health", healthCheckHandler)
 	router.POST("/upload", uploadHandler)
