@@ -188,9 +188,8 @@ func uploadHandler(c *gin.Context) {
 
 	// If err is nil, object exists. If err is not nil, check if it's a NotFound error.
 	if err == nil {
-		// Object already exists, return its URL
-		publicURL := fmt.Sprintf("%s/%s", r2PublicURL, newFileName)
-		c.JSON(http.StatusOK, gin.H{"message": "File already exists", "url": publicURL})
+		// Object already exists, return the filename only
+		c.JSON(http.StatusOK, gin.H{"message": "File already exists", "url": newFileName})
 		return
 	}
 
@@ -217,10 +216,8 @@ func uploadHandler(c *gin.Context) {
 		return
 	}
 
-	// Construct public URL
-	publicURL := fmt.Sprintf("%s/%s", r2PublicURL, newFileName)
-
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "url": publicURL})
+	// Return the filename only (client will construct full URL if needed)
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "url": newFileName})
 }
 
 func getContentType(ext string) string {
