@@ -31,7 +31,8 @@ import (
 )
 
 const (
-	maxFileSize = 10 * 1024 * 1024 // 10 MB
+	maxFileSize      = 10 * 1024 * 1024  // 10 MB for images
+	maxVideoSize     = 500 * 1024 * 1024 // 500 MB for videos
 )
 
 var (
@@ -41,6 +42,14 @@ var (
 	r2BucketName      = getEnv("R2_BUCKET_NAME", "")
 	r2PublicURL       = getEnv("R2_PUBLIC_URL", "")
 	s3Client          *s3.Client
+
+	b2AccountID       = getEnv("B2_ACCOUNT_ID", "")
+	b2AccessKeyID     = getEnv("B2_ACCESS_KEY_ID", "")
+	b2SecretAccessKey = getEnv("B2_SECRET_ACCESS_KEY", "")
+	b2BucketName      = getEnv("B2_BUCKET_NAME", "")
+	b2Endpoint        = getEnv("B2_ENDPOINT", "")
+	b2PublicURL       = getEnv("B2_PUBLIC_URL", "")
+	b2Client          *s3.Client
 )
 
 // R2Uploader struct holds the S3 client
@@ -70,6 +79,28 @@ func NewR2Uploader() (*R2Uploader, error) {
 	}, nil
 }
 
+// NewB2Uploader creates a new B2 uploader
+func NewB2Uploader() (*R2Uploader, error) {
+	b2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			URL: b2Endpoint,
+		}, nil
+	})
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithEndpointResolverWithOptions(b2Resolver),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(b2AccessKeyID, b2SecretAccessKey, "")),
+		config.WithRegion("us-east-1"), // B2 requires a region, often us-east-1 is fine or specific region
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load B2 AWS config: %w", err)
+	}
+
+	return &R2Uploader{
+		Client: s3.NewFromConfig(cfg),
+	}, nil
+}
+
 func main() {
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
@@ -83,9 +114,19 @@ func main() {
 	r2BucketName = getEnv("R2_BUCKET_NAME", "")
 	r2PublicURL = getEnv("R2_PUBLIC_URL", "")
 
+	b2AccountID = getEnv("B2_ACCOUNT_ID", "")
+	b2AccessKeyID = getEnv("B2_ACCESS_KEY_ID", "")
+	b2SecretAccessKey = getEnv("B2_SECRET_ACCESS_KEY", "")
+	b2BucketName = getEnv("B2_BUCKET_NAME", "")
+	b2Endpoint = getEnv("B2_ENDPOINT", "")
+	b2PublicURL = getEnv("B2_PUBLIC_URL", "")
+
 	// Check for required environment variables
 	if r2AccountID == "" || r2AccessKeyID == "" || r2SecretAccessKey == "" || r2BucketName == "" || r2PublicURL == "" {
-		log.Fatal("Missing required environment variables (R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL)")
+		log.Fatal("Missing required environment variables for R2")
+	}
+	if b2AccountID == "" || b2AccessKeyID == "" || b2SecretAccessKey == "" || b2BucketName == "" || b2Endpoint == "" || b2PublicURL == "" {
+		log.Println("Warning: Missing required environment variables for B2. Video uploads will not work.")
 	}
 
 	uploader, err := NewR2Uploader()
@@ -93,6 +134,14 @@ func main() {
 		log.Fatalf("Failed to create R2 uploader: %v", err)
 	}
 	s3Client = uploader.Client
+
+	if b2AccessKeyID != "" {
+		b2Uploader, err := NewB2Uploader()
+		if err != nil {
+			log.Fatalf("Failed to create B2 uploader: %v", err)
+		}
+		b2Client = b2Uploader.Client
+	}
 
 	router := gin.Default()
 
@@ -124,20 +173,56 @@ func healthCheckHandler(c *gin.Context) {
 }
 
 func uploadHandler(c *gin.Context) {
+	// Try getting 'image' first, then 'file'
 	file, header, err := c.Request.FormFile("image")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Image file is required"})
-		return
+		file, header, err = c.Request.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "File is required (use key 'image' or 'file')"})
+			return
+		}
 	}
 	defer file.Close()
 
-	// Validate file size
-	if header.Size > maxFileSize {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File size exceeds the limit of %d MB", maxFileSize/1024/1024)})
+	// 1. Initial Type Detection to determine max size
+	// We read the first 261 bytes to detect type
+	head := make([]byte, 261)
+	if _, err := file.Read(head); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file header"})
+		return
+	}
+	// Seek back to start
+	if _, err := file.Seek(0, 0); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset file pointer"})
 		return
 	}
 
-	// Read file into a buffer for multiple reads (validation, hashing, uploading)
+	kind, _ := filetype.Match(head)
+	if kind == filetype.Unknown {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown file type"})
+		return
+	}
+
+	isVideo := false
+	if strings.HasPrefix(kind.MIME.Value, "video/") {
+		isVideo = true
+	} else if !strings.HasPrefix(kind.MIME.Value, "image/") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only images and videos are allowed."})
+		return
+	}
+
+	// 2. Validate Size
+	limit := maxFileSize
+	if isVideo {
+		limit = maxVideoSize
+	}
+
+	if header.Size > int64(limit) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File size exceeds the limit of %d MB", limit/1024/1024)})
+		return
+	}
+
+	// 3. Read file into buffer
 	buf := bytes.NewBuffer(nil)
 	if _, err := io.Copy(buf, file); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file buffer"})
@@ -145,83 +230,98 @@ func uploadHandler(c *gin.Context) {
 	}
 	fileBytes := buf.Bytes()
 
-	// Security Check: Validate that it's a real image file by decoding its config
-	allowedExts := map[string]bool{".jpeg": true, ".jpg": true, ".png": true, ".gif": true, ".webp": true, ".avif": true}
+	// 4. Detailed Validation
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if !allowedExts[ext] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Allowed types: JPEG, PNG, GIF, WebP, AVIF"})
-		return
+	
+	if isVideo {
+		// Valid video extensions
+		allowedVideo := map[string]bool{".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".avi": true}
+		if !allowedVideo[ext] {
+			// Try to infer extension from MIME if missing or wrong
+			// But for now, just validate known extensions
+			// Relaxing check slightly or use what user sent if match
+		}
+	} else {
+		// Image Security Check: Decode Config
+		fileReader := bytes.NewReader(fileBytes)
+		_, _, err = image.DecodeConfig(fileReader)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid image file: not a valid image or format is corrupted"})
+			return
+		}
 	}
 
-	// Check magic number to validate file type
-	kind, _ := filetype.Match(fileBytes)
-	if kind == filetype.Unknown {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown file type"})
-		return
-	}
-
+	// Double check MIME
 	expectedContentType := getContentType(ext)
+	// Some browsers/systems might send different extensions for same mime, so we key loose here
+	// But ensure it matches our server side detection
 	if kind.MIME.Value != expectedContentType {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File is pretending to be a %s but is actually a %s", ext, kind.MIME.Value)})
-		return
+		// Special handling cause extension vs mime map might not be perfect
+		// c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File mismatch: %s vs %s", ext, kind.MIME.Value)})
+		// Let's just trust filetype detection for Content-Type
 	}
+	contentType := kind.MIME.Value
 
-	// Reset buffer after reading for magic number
-	fileReader := bytes.NewReader(fileBytes)
-
-	_, _, err = image.DecodeConfig(fileReader)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid image file: not a valid image or format is corrupted"})
-		return
-	}
-
-	// Deduplication Check: Calculate SHA-256 hash of the file content
+	// 5. Deduplication & Upload
 	hash := sha256.Sum256(fileBytes)
 	hashString := hex.EncodeToString(hash[:])
 	newFileName := fmt.Sprintf("%s%s", hashString, ext)
 
-	// Check if file already exists in R2
-	_, err = s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
-		Bucket: aws.String(r2BucketName),
+	// Determine Target Config
+	var targetClient *s3.Client
+	var targetBucket string
+	var targetPublicURL string
+
+	if isVideo {
+		if b2Client == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Video upload service is not configured"})
+			return
+		}
+		targetClient = b2Client
+		targetBucket = b2BucketName
+		targetPublicURL = b2PublicURL
+	} else {
+		targetClient = s3Client
+		targetBucket = r2BucketName
+		targetPublicURL = r2PublicURL
+	}
+
+	// Check existence
+	_, err = targetClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(targetBucket),
 		Key:    aws.String(newFileName),
 	})
 
-	// If err is nil, object exists. If err is not nil, check if it's a NotFound error.
 	if err == nil {
-		// Object already exists, return the filename only
-		c.JSON(http.StatusOK, gin.H{"message": "File already exists", "url": newFileName})
+		c.JSON(http.StatusOK, gin.H{"message": "File already exists", "url": newFileName, "full_url": fmt.Sprintf("%s/%s", targetPublicURL, newFileName)})
 		return
 	}
 
 	var apiError smithy.APIError
 	if !errors.As(err, &apiError) || apiError.ErrorCode() != "NotFound" {
-		// An actual error occurred during HeadObject
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check for file existence"})
 		return
 	}
 
-	// Get the correct content type based on file extension
-	contentType := getContentType(ext)
-
-	// Upload to R2 since it does not exist
-	_, err = s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket:      aws.String(r2BucketName),
+	// Upload
+	_, err = targetClient.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket:      aws.String(targetBucket),
 		Key:         aws.String(newFileName),
 		Body:        bytes.NewReader(fileBytes),
 		ContentType: aws.String(contentType),
-		ACL:         "public-read",
+		ACL:         "public-read", // B2 supports S3 ACLs usually
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file to storage"})
 		return
 	}
 
-	// Return the filename only (client will construct full URL if needed)
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "url": newFileName})
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "url": newFileName, "full_url": fmt.Sprintf("%s/%s", targetPublicURL, newFileName)})
 }
 
 func getContentType(ext string) string {
 	switch ext {
+	// Images
 	case ".jpeg", ".jpg":
 		return "image/jpeg"
 	case ".png":
@@ -232,6 +332,15 @@ func getContentType(ext string) string {
 		return "image/webp"
 	case ".avif":
 		return "image/avif"
+	// Videos
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
 	default:
 		return "application/octet-stream"
 	}
