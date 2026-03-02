@@ -241,8 +241,9 @@ func healthCheckHandler(c *gin.Context) {
 }
 
 func uploadHandler(c *gin.Context) {
-	// 0. Determine Target Bucket
+	// 0. Determine Target Bucket and Path
 	targetBucketType := c.Query("bucket") // e.g. "storage"
+	pathPrefix := c.Query("path")         // e.g. "public" or "premium"
 
 	// Try getting 'image' first, then 'file'
 	file, header, err := c.Request.FormFile("image")
@@ -340,6 +341,14 @@ func uploadHandler(c *gin.Context) {
 	hashString := hex.EncodeToString(hash[:])
 	newFileName := fmt.Sprintf("%s%s", hashString, ext)
 
+	// Prepend path prefix if provided
+	objectKey := newFileName
+	if pathPrefix != "" {
+		// Clean the path prefix and ensure it doesn't end with /
+		pathPrefix = strings.Trim(pathPrefix, "/")
+		objectKey = fmt.Sprintf("%s/%s", pathPrefix, newFileName)
+	}
+
 	// Determine Target Config
 	var targetClient *s3.Client
 	var targetBucket string
@@ -370,11 +379,16 @@ func uploadHandler(c *gin.Context) {
 	// Check existence
 	_, err = targetClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
 		Bucket: aws.String(targetBucket),
-		Key:    aws.String(newFileName),
+		Key:    aws.String(objectKey),
 	})
 
 	if err == nil {
-		c.JSON(http.StatusOK, gin.H{"message": "File already exists", "url": newFileName, "full_url": fmt.Sprintf("%s/%s", targetPublicURL, newFileName)})
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "File already exists",
+			"url":      objectKey,
+			"filename": newFileName,
+			"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
+		})
 		return
 	}
 
@@ -387,7 +401,7 @@ func uploadHandler(c *gin.Context) {
 	// Upload
 	_, err = targetClient.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket:      aws.String(targetBucket),
-		Key:         aws.String(newFileName),
+		Key:         aws.String(objectKey),
 		Body:        bytes.NewReader(fileBytes),
 		ContentType: aws.String(contentType),
 		ACL:         "public-read", // B2 supports S3 ACLs usually
@@ -397,7 +411,12 @@ func uploadHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "url": newFileName, "full_url": fmt.Sprintf("%s/%s", targetPublicURL, newFileName)})
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "File uploaded successfully",
+		"url":      objectKey,
+		"filename": newFileName,
+		"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
+	})
 }
 
 func getContentType(ext string) string {
