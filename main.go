@@ -25,6 +25,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/h2non/filetype"
 	"github.com/joho/godotenv"
 	_ "golang.org/x/image/webp"
@@ -36,11 +37,17 @@ const (
 )
 
 var (
+	jwtSecret         = getEnv("JWT_SECRET", "")
 	r2AccountID       = getEnv("R2_ACCOUNT_ID", "")
 	r2AccessKeyID     = getEnv("R2_ACCESS_KEY_ID", "")
 	r2SecretAccessKey = getEnv("R2_SECRET_ACCESS_KEY", "")
 	r2BucketName      = getEnv("R2_BUCKET_NAME", "")
 	r2PublicURL       = getEnv("R2_PUBLIC_URL", "")
+
+	// New storage bucket for games
+	r2StorageBucketName = getEnv("R2_STORAGE_BUCKET_NAME", "")
+	r2StoragePublicURL  = getEnv("R2_STORAGE_PUBLIC_URL", "")
+
 	s3Client          *s3.Client
 
 	b2AccountID       = getEnv("B2_ACCOUNT_ID", "")
@@ -108,11 +115,15 @@ func main() {
 	}
 
 	// Re-evaluate variables after loading .env
+	jwtSecret = getEnv("JWT_SECRET", "")
 	r2AccountID = getEnv("R2_ACCOUNT_ID", "")
 	r2AccessKeyID = getEnv("R2_ACCESS_KEY_ID", "")
 	r2SecretAccessKey = getEnv("R2_SECRET_ACCESS_KEY", "")
 	r2BucketName = getEnv("R2_BUCKET_NAME", "")
 	r2PublicURL = getEnv("R2_PUBLIC_URL", "")
+
+	r2StorageBucketName = getEnv("R2_STORAGE_BUCKET_NAME", "")
+	r2StoragePublicURL = getEnv("R2_STORAGE_PUBLIC_URL", "")
 
 	b2AccountID = getEnv("B2_ACCOUNT_ID", "")
 	b2AccessKeyID = getEnv("B2_ACCESS_KEY_ID", "")
@@ -125,6 +136,11 @@ func main() {
 	if r2AccountID == "" || r2AccessKeyID == "" || r2SecretAccessKey == "" || r2BucketName == "" || r2PublicURL == "" {
 		log.Fatal("Missing required environment variables for R2")
 	}
+
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is required for security")
+	}
+
 	if b2AccountID == "" || b2AccessKeyID == "" || b2SecretAccessKey == "" || b2BucketName == "" || b2Endpoint == "" || b2PublicURL == "" {
 		log.Println("Warning: Missing required environment variables for B2. Video uploads will not work.")
 	}
@@ -146,25 +162,77 @@ func main() {
 	router := gin.Default()
 
 	// CORS middleware
-    config := cors.DefaultConfig()
-    config.AllowOrigins = []string{
-        "http://localhost:3000",
-        "https://chanomhub.online",
-        "https://chanomhub.com",
-        "https://www.chanomhub.online",
-        "https://www.chanomhub.com",
-    }
-    config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-    config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
-    config.AllowCredentials = true
-    router.Use(cors.New(config))
+	config := cors.DefaultConfig()
+	config.AllowOrigins = []string{
+		"http://localhost:3000",
+		"https://chanomhub.online",
+		"https://chanomhub.com",
+		"https://www.chanomhub.online",
+		"https://www.chanomhub.com",
+	}
+	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
+	config.AllowCredentials = true
+	router.Use(cors.New(config))
 
 	router.GET("/health", healthCheckHandler)
-	router.POST("/upload", uploadHandler)
+
+	// Protected routes
+	authorized := router.Group("/")
+	authorized.Use(JWTMiddleware())
+	{
+		authorized.POST("/upload", uploadHandler)
+	}
 
 	log.Println("Server started at http://localhost:8080")
 	if err := router.Run(":8080"); err != nil {
 		log.Fatalf("Failed to run server: %v", err)
+	}
+}
+
+func JWTMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is required"})
+			return
+		}
+
+		// Handle potential double Bearer prefix or weird formatting from backend/some clients
+		if strings.Contains(authHeader, "Bearer Authorization: Bearer") {
+			parts := strings.Split(authHeader, "Bearer Authorization: Bearer")
+			if len(parts) > 1 {
+				authHeader = "Bearer " + strings.TrimSpace(parts[1])
+			}
+		}
+
+		parts := strings.SplitN(authHeader, " ", 2)
+		if !(len(parts) == 2 && parts[0] == "Bearer") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header must be in 'Bearer {token}' format"})
+			return
+		}
+
+		tokenString := parts[1]
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// Validate the signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(jwtSecret), nil
+		})
+
+		if err != nil || !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			return
+		}
+
+		// Optionally set user information in context
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			c.Set("user_id", claims["sub"])
+			c.Set("username", claims["username"])
+		}
+
+		c.Next()
 	}
 }
 
@@ -173,6 +241,9 @@ func healthCheckHandler(c *gin.Context) {
 }
 
 func uploadHandler(c *gin.Context) {
+	// 0. Determine Target Bucket
+	targetBucketType := c.Query("bucket") // e.g. "storage"
+
 	// Try getting 'image' first, then 'file'
 	file, header, err := c.Request.FormFile("image")
 	if err != nil {
@@ -198,15 +269,18 @@ func uploadHandler(c *gin.Context) {
 	}
 
 	kind, _ := filetype.Match(head)
-	if kind == filetype.Unknown {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown file type"})
-		return
+	// Relaxed type checking for storage bucket
+	if targetBucketType != "storage" {
+		if kind == filetype.Unknown {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown file type"})
+			return
+		}
 	}
 
 	isVideo := false
-	if strings.HasPrefix(kind.MIME.Value, "video/") {
+	if kind != filetype.Unknown && strings.HasPrefix(kind.MIME.Value, "video/") {
 		isVideo = true
-	} else if !strings.HasPrefix(kind.MIME.Value, "image/") {
+	} else if targetBucketType != "storage" && !strings.HasPrefix(kind.MIME.Value, "image/") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file type. Only images and videos are allowed."})
 		return
 	}
@@ -215,6 +289,10 @@ func uploadHandler(c *gin.Context) {
 	limit := maxFileSize
 	if isVideo {
 		limit = maxVideoSize
+	}
+	if targetBucketType == "storage" {
+		// Allow larger files for game storage
+		limit = 1000 * 1024 * 1024 // 1 GB limit for storage
 	}
 
 	if header.Size > int64(limit) {
@@ -232,35 +310,30 @@ func uploadHandler(c *gin.Context) {
 
 	// 4. Detailed Validation
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	
-	if isVideo {
-		// Valid video extensions
-		allowedVideo := map[string]bool{".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".avi": true}
-		if !allowedVideo[ext] {
-			// Try to infer extension from MIME if missing or wrong
-			// But for now, just validate known extensions
-			// Relaxing check slightly or use what user sent if match
-		}
-	} else {
-		// Image Security Check: Decode Config
-		fileReader := bytes.NewReader(fileBytes)
-		_, _, err = image.DecodeConfig(fileReader)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid image file: not a valid image or format is corrupted"})
-			return
+
+	if targetBucketType != "storage" {
+		if isVideo {
+			// Valid video extensions
+			allowedVideo := map[string]bool{".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".avi": true}
+			if !allowedVideo[ext] {
+				// We still allow it if filetype detected it as video
+			}
+		} else {
+			// Image Security Check: Decode Config
+			fileReader := bytes.NewReader(fileBytes)
+			_, _, err = image.DecodeConfig(fileReader)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid image file: not a valid image or format is corrupted"})
+				return
+			}
 		}
 	}
 
 	// Double check MIME
-	expectedContentType := getContentType(ext)
-	// Some browsers/systems might send different extensions for same mime, so we key loose here
-	// But ensure it matches our server side detection
-	if kind.MIME.Value != expectedContentType {
-		// Special handling cause extension vs mime map might not be perfect
-		// c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("File mismatch: %s vs %s", ext, kind.MIME.Value)})
-		// Let's just trust filetype detection for Content-Type
-	}
 	contentType := kind.MIME.Value
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = getContentType(ext)
+	}
 
 	// 5. Deduplication & Upload
 	hash := sha256.Sum256(fileBytes)
@@ -272,7 +345,15 @@ func uploadHandler(c *gin.Context) {
 	var targetBucket string
 	var targetPublicURL string
 
-	if isVideo {
+	if targetBucketType == "storage" {
+		if r2StorageBucketName == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Storage bucket is not configured"})
+			return
+		}
+		targetClient = s3Client
+		targetBucket = r2StorageBucketName
+		targetPublicURL = r2StoragePublicURL
+	} else if isVideo {
 		if b2Client == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Video upload service is not configured"})
 			return
