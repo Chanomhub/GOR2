@@ -199,12 +199,20 @@ func JWTMiddleware() gin.HandlerFunc {
 		}
 
 		// Handle potential double Bearer prefix or weird formatting from backend/some clients
-		if strings.Contains(authHeader, "Bearer Authorization: Bearer") {
-			parts := strings.Split(authHeader, "Bearer Authorization: Bearer")
-			if len(parts) > 1 {
-				authHeader = "Bearer " + strings.TrimSpace(parts[1])
+		// Examples: "Bearer Bearer eyJ...", "Bearer Authorization: Bearer eyJ...", "Bearer Bearer Bearer eyJ..."
+		authHeader = strings.TrimSpace(authHeader)
+		for {
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				authHeader = strings.TrimPrefix(authHeader, "Bearer ")
+			} else if strings.HasPrefix(authHeader, "Authorization: ") {
+				authHeader = strings.TrimPrefix(authHeader, "Authorization: ")
+			} else {
+				break
 			}
+			authHeader = strings.TrimSpace(authHeader)
 		}
+		// Put it back to a single "Bearer {token}" for the next split logic
+		authHeader = "Bearer " + authHeader
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if !(len(parts) == 2 && parts[0] == "Bearer") {
