@@ -417,11 +417,16 @@ func uploadHandler(c *gin.Context) {
 	}
 
 	// 5. Deduplication & Upload
+	gameSlug := c.Query("game")
+	if targetBucketType == "storage" && gameSlug == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
+		return
+	}
+
 	hash := sha256.Sum256(fileBytes)
 	hashString := hex.EncodeToString(hash[:])
 	shortHash := hashString[:8]
 
-	gameSlug := c.Query("game")
 	objectKey := generateObjectKey(pathPrefix, gameSlug, header.Filename, shortHash)
 
 	// Determine Target Config
@@ -482,6 +487,11 @@ func initiateMultipartUploadHandler(c *gin.Context) {
 	gameSlug := c.Query("game")
 	filename := c.Query("filename")
 	contentType := c.Query("contentType")
+
+	if targetBucketType == "storage" && gameSlug == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
+		return
+	}
 
 	if filename == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "filename query parameter is required"})
