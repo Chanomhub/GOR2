@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -60,6 +61,70 @@ var (
 	b2PublicURL       = getEnv("B2_PUBLIC_URL", "")
 	b2Client          *s3.Client
 )
+
+// S3Config helper struct
+type S3Config struct {
+	Client    *s3.Client
+	Bucket    string
+	PublicURL string
+}
+
+func getS3Config(targetBucketType string, isVideo bool) (*S3Config, error) {
+	var targetClient *s3.Client
+	var targetBucket string
+	var targetPublicURL string
+
+	if targetBucketType == "storage" {
+		if r2StorageBucketName == "" {
+			return nil, errors.New("storage bucket is not configured")
+		}
+		targetClient = s3Client
+		targetBucket = r2StorageBucketName
+		targetPublicURL = r2StoragePublicURL
+	} else if isVideo {
+		if b2Client == nil {
+			return nil, errors.New("video upload service is not configured")
+		}
+		targetClient = b2Client
+		targetBucket = b2BucketName
+		targetPublicURL = b2PublicURL
+	} else {
+		targetClient = s3Client
+		targetBucket = r2BucketName
+		targetPublicURL = r2PublicURL
+	}
+
+	return &S3Config{
+		Client:    targetClient,
+		Bucket:    targetBucket,
+		PublicURL: targetPublicURL,
+	}, nil
+}
+
+func generateObjectKey(pathPrefix, gameSlug, fileName, shortHash string) string {
+	now := time.Now()
+	year := now.Year()
+	month := int(now.Month())
+
+	prefix := "public"
+	if pathPrefix != "" {
+		prefix = strings.Trim(pathPrefix, "/")
+	}
+
+	if gameSlug == "" {
+		gameSlug = "misc"
+	}
+
+	re := regexp.MustCompile(`[^a-zA-Z0-9.\-_]`)
+	safeName := re.ReplaceAllString(fileName, "_")
+
+	if shortHash != "" {
+		return fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
+	}
+	
+	// For multipart upload where hash isn't known yet, use a timestamp to ensure uniqueness
+	return fmt.Sprintf("%s/%s/%d/%02d/%d_%s", prefix, gameSlug, year, month, time.Now().UnixNano(), safeName)
+}
 
 // R2Uploader struct holds the S3 client
 type R2Uploader struct {
@@ -184,6 +249,11 @@ func main() {
 	authorized.Use(JWTMiddleware())
 	{
 		authorized.POST("/upload", uploadHandler)
+		// Chunked/Multipart Upload Routes
+		authorized.POST("/upload/initiate", initiateMultipartUploadHandler)
+		authorized.POST("/upload/part", uploadPartHandler)
+		authorized.POST("/upload/complete", completeMultipartUploadHandler)
+		authorized.POST("/upload/abort", abortMultipartUploadHandler)
 	}
 
 	log.Println("Server started at http://localhost:8080")
@@ -351,59 +421,19 @@ func uploadHandler(c *gin.Context) {
 	hashString := hex.EncodeToString(hash[:])
 	shortHash := hashString[:8]
 
-	// Clean filename: remove special characters, but keep extension
-	re := regexp.MustCompile(`[^a-zA-Z0-9.\-_]`)
-	safeName := re.ReplaceAllString(header.Filename, "_")
-
-	// Determine Path Structure: {prefix}/{game_slug}/{year}/{month}/{short_hash}/{safeName}
 	gameSlug := c.Query("game")
-	if gameSlug == "" {
-		gameSlug = "misc"
-	}
-
-	now := time.Now()
-	year := now.Year()
-	month := int(now.Month())
-
-	// Prepend path prefix if provided (e.g., "public" or "premium")
-	prefix := "public"
-	if pathPrefix != "" {
-		prefix = strings.Trim(pathPrefix, "/")
-	}
-	
-	// Final structure implementation
-	objectKey := fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
+	objectKey := generateObjectKey(pathPrefix, gameSlug, header.Filename, shortHash)
 
 	// Determine Target Config
-	var targetClient *s3.Client
-	var targetBucket string
-	var targetPublicURL string
-
-	if targetBucketType == "storage" {
-		if r2StorageBucketName == "" {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Storage bucket is not configured"})
-			return
-		}
-		targetClient = s3Client
-		targetBucket = r2StorageBucketName
-		targetPublicURL = r2StoragePublicURL
-	} else if isVideo {
-		if b2Client == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Video upload service is not configured"})
-			return
-		}
-		targetClient = b2Client
-		targetBucket = b2BucketName
-		targetPublicURL = b2PublicURL
-	} else {
-		targetClient = s3Client
-		targetBucket = r2BucketName
-		targetPublicURL = r2PublicURL
+	cfg, err := getS3Config(targetBucketType, isVideo)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
 	}
 
 	// Check existence
-	_, err = targetClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
-		Bucket: aws.String(targetBucket),
+	_, err = cfg.Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(cfg.Bucket),
 		Key:    aws.String(objectKey),
 	})
 
@@ -411,8 +441,8 @@ func uploadHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message":  "File already exists",
 			"url":      objectKey,
-			"filename": safeName,
-			"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
+			"filename": header.Filename,
+			"full_url": fmt.Sprintf("%s/%s", cfg.PublicURL, objectKey),
 		})
 		return
 	}
@@ -424,8 +454,8 @@ func uploadHandler(c *gin.Context) {
 	}
 
 	// Upload
-	_, err = targetClient.PutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket:      aws.String(targetBucket),
+	_, err = cfg.Client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket:      aws.String(cfg.Bucket),
 		Key:         aws.String(objectKey),
 		Body:        bytes.NewReader(fileBytes),
 		ContentType: aws.String(contentType),
@@ -439,9 +469,198 @@ func uploadHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "File uploaded successfully",
 		"url":      objectKey,
-		"filename": safeName,
-		"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
+		"filename": header.Filename,
+		"full_url": fmt.Sprintf("%s/%s", cfg.PublicURL, objectKey),
 	})
+}
+
+// Multipart Upload Handlers
+
+func initiateMultipartUploadHandler(c *gin.Context) {
+	targetBucketType := c.Query("bucket")
+	pathPrefix := c.Query("path")
+	gameSlug := c.Query("game")
+	filename := c.Query("filename")
+	contentType := c.Query("contentType")
+
+	if filename == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "filename query parameter is required"})
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	isVideo := false
+	if strings.HasPrefix(contentType, "video/") || strings.Contains(".mp4.webm.mov.mkv.avi", ext) {
+		isVideo = true
+	}
+
+	if contentType == "" {
+		contentType = getContentType(ext)
+	}
+
+	cfg, err := getS3Config(targetBucketType, isVideo)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	objectKey := generateObjectKey(pathPrefix, gameSlug, filename, "")
+
+	output, err := cfg.Client.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(cfg.Bucket),
+		Key:         aws.String(objectKey),
+		ContentType: aws.String(contentType),
+		ACL:         "public-read",
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to initiate multipart upload: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"uploadId": *output.UploadId,
+		"key":      *output.Key,
+		"bucket":   cfg.Bucket,
+		"isVideo":  isVideo,
+	})
+}
+
+func uploadPartHandler(c *gin.Context) {
+	uploadId := c.Query("uploadId")
+	key := c.Query("key")
+	partNumberStr := c.Query("partNumber")
+	bucket := c.Query("bucket")
+	isVideoStr := c.Query("isVideo")
+
+	if uploadId == "" || key == "" || partNumberStr == "" || bucket == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "uploadId, key, partNumber, and bucket are required"})
+		return
+	}
+
+	var partNumber int32
+	fmt.Sscanf(partNumberStr, "%d", &partNumber)
+
+	isVideo := isVideoStr == "true"
+	// We need the client but we already have the bucket.
+	// We use bucket type to decide which client (R2 or B2).
+	// For simplicity, we can try to guess from bucket name or just pass bucketType.
+	targetBucketType := c.Query("bucketType")
+	cfg, err := getS3Config(targetBucketType, isVideo)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Read body
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read part data"})
+		return
+	}
+
+	output, err := cfg.Client.UploadPart(context.TODO(), &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadId),
+		PartNumber: &partNumber,
+		Body:       bytes.NewReader(body),
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to upload part: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"etag": *output.ETag,
+	})
+}
+
+type LocalCompletedPart struct {
+	ETag       string `json:"etag" binding:"required"`
+	PartNumber int32  `json:"partNumber" binding:"required"`
+}
+
+type CompleteMultipartRequest struct {
+	UploadId   string               `json:"uploadId" binding:"required"`
+	Key        string               `json:"key" binding:"required"`
+	Bucket     string               `json:"bucket" binding:"required"`
+	Parts      []LocalCompletedPart `json:"parts" binding:"required"`
+	IsVideo    bool                 `json:"isVideo"`
+	BucketType string               `json:"bucketType"`
+}
+
+func completeMultipartUploadHandler(c *gin.Context) {
+	var req CompleteMultipartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg, err := getS3Config(req.BucketType, req.IsVideo)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Convert local parts to AWS SDK types
+	completedParts := make([]types.CompletedPart, len(req.Parts))
+	for i, p := range req.Parts {
+		completedParts[i] = types.CompletedPart{
+			ETag:       aws.String(p.ETag),
+			PartNumber: aws.Int32(p.PartNumber),
+		}
+	}
+
+	_, err = cfg.Client.CompleteMultipartUpload(context.TODO(), &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(req.Bucket),
+		Key:      aws.String(req.Key),
+		UploadId: aws.String(req.UploadId),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completedParts,
+		},
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to complete multipart upload: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Upload completed successfully",
+		"key":      req.Key,
+		"url":      req.Key,
+		"full_url": fmt.Sprintf("%s/%s", cfg.PublicURL, req.Key),
+	})
+}
+
+func abortMultipartUploadHandler(c *gin.Context) {
+	uploadId := c.Query("uploadId")
+	key := c.Query("key")
+	bucket := c.Query("bucket")
+	isVideo := c.Query("isVideo") == "true"
+	bucketType := c.Query("bucketType")
+
+	if uploadId == "" || key == "" || bucket == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "uploadId, key, and bucket are required"})
+		return
+	}
+
+	cfg, err := getS3Config(bucketType, isVideo)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+
+	_, err = cfg.Client.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadId),
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to abort multipart upload: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Upload aborted successfully"})
 }
 
 func getContentType(ext string) string {
