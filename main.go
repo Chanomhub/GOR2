@@ -16,7 +16,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -347,15 +349,30 @@ func uploadHandler(c *gin.Context) {
 	// 5. Deduplication & Upload
 	hash := sha256.Sum256(fileBytes)
 	hashString := hex.EncodeToString(hash[:])
-	newFileName := fmt.Sprintf("%s%s", hashString, ext)
+	shortHash := hashString[:8]
 
-	// Prepend path prefix if provided
-	objectKey := newFileName
-	if pathPrefix != "" {
-		// Clean the path prefix and ensure it doesn't end with /
-		pathPrefix = strings.Trim(pathPrefix, "/")
-		objectKey = fmt.Sprintf("%s/%s", pathPrefix, newFileName)
+	// Clean filename: remove special characters, but keep extension
+	re := regexp.MustCompile(`[^a-zA-Z0-9.\-_]`)
+	safeName := re.ReplaceAllString(header.Filename, "_")
+
+	// Determine Path Structure: {prefix}/{game_slug}/{year}/{month}/{short_hash}/{safeName}
+	gameSlug := c.Query("game")
+	if gameSlug == "" {
+		gameSlug = "misc"
 	}
+
+	now := time.Now()
+	year := now.Year()
+	month := int(now.Month())
+
+	// Prepend path prefix if provided (e.g., "public" or "premium")
+	prefix := "public"
+	if pathPrefix != "" {
+		prefix = strings.Trim(pathPrefix, "/")
+	}
+	
+	// Final structure implementation
+	objectKey = fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
 
 	// Determine Target Config
 	var targetClient *s3.Client
@@ -394,7 +411,7 @@ func uploadHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message":  "File already exists",
 			"url":      objectKey,
-			"filename": newFileName,
+			"filename": safeName,
 			"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
 		})
 		return
@@ -422,7 +439,7 @@ func uploadHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "File uploaded successfully",
 		"url":      objectKey,
-		"filename": newFileName,
+		"filename": safeName,
 		"full_url": fmt.Sprintf("%s/%s", targetPublicURL, objectKey),
 	})
 }
