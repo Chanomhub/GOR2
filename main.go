@@ -372,7 +372,7 @@ func uploadHandler(c *gin.Context) {
 	}
 	
 	// Final structure implementation
-	objectKey = fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
+	objectKey := fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
 
 	// Determine Target Config
 	var targetClient *s3.Client
