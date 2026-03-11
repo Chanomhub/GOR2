@@ -111,8 +111,9 @@ func generateObjectKey(pathPrefix, gameSlug, fileName, shortHash string) string 
 		prefix = strings.Trim(pathPrefix, "/")
 	}
 
+	// gameSlug is now strictly required by the handlers, so we don't default to "misc" here
 	if gameSlug == "" {
-		gameSlug = "misc"
+		gameSlug = "unknown"
 	}
 
 	re := regexp.MustCompile(`[^a-zA-Z0-9.\-_]`)
@@ -418,9 +419,17 @@ func uploadHandler(c *gin.Context) {
 
 	// 5. Deduplication & Upload
 	gameSlug := c.Query("game")
-	if targetBucketType == "storage" && gameSlug == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
-		return
+	if targetBucketType == "storage" {
+		if gameSlug == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
+			return
+		}
+		// Block generic slugs
+		genericSlugs := map[string]bool{"misc": true, "unknown": true, "pending": true, "unnamed-game": true}
+		if genericSlugs[strings.ToLower(gameSlug)] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "generic game slugs are not allowed for storage bucket"})
+			return
+		}
 	}
 
 	hash := sha256.Sum256(fileBytes)
@@ -488,9 +497,17 @@ func initiateMultipartUploadHandler(c *gin.Context) {
 	filename := c.Query("filename")
 	contentType := c.Query("contentType")
 
-	if targetBucketType == "storage" && gameSlug == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
-		return
+	if targetBucketType == "storage" {
+		if gameSlug == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "game slug is required for storage bucket"})
+			return
+		}
+		// Block generic slugs
+		genericSlugs := map[string]bool{"misc": true, "unknown": true, "pending": true, "unnamed-game": true}
+		if genericSlugs[strings.ToLower(gameSlug)] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "generic game slugs are not allowed for storage bucket"})
+			return
+		}
 	}
 
 	if filename == "" {
