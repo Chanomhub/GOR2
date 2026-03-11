@@ -40,7 +40,14 @@ const (
 )
 
 var (
+	// jwtSecret is required for security
 	jwtSecret         = getEnv("JWT_SECRET", "")
+
+	// --- Domain Mapping Documentation ---
+	// r2PublicURL (Images/Media)       -> cdn.chanomhub.com
+	// r2StoragePublicURL (Game Files)  -> storage.chanomhub.com
+	// ------------------------------------
+
 	r2AccountID       = getEnv("R2_ACCOUNT_ID", "")
 	r2AccessKeyID     = getEnv("R2_ACCESS_KEY_ID", "")
 	r2SecretAccessKey = getEnv("R2_SECRET_ACCESS_KEY", "")
@@ -106,25 +113,42 @@ func generateObjectKey(pathPrefix, gameSlug, fileName, shortHash string) string 
 	year := now.Year()
 	month := int(now.Month())
 
-	prefix := "public"
+	// No mandatory 'public' prefix anymore. Starts from root unless pathPrefix is given.
+	prefix := ""
 	if pathPrefix != "" {
 		prefix = strings.Trim(pathPrefix, "/")
-	}
-
-	// gameSlug is now strictly required by the handlers, so we don't default to "misc" here
-	if gameSlug == "" {
-		gameSlug = "unknown"
 	}
 
 	re := regexp.MustCompile(`[^a-zA-Z0-9.\-_]`)
 	safeName := re.ReplaceAllString(fileName, "_")
 
-	if shortHash != "" {
-		return fmt.Sprintf("%s/%s/%d/%02d/%s/%s", prefix, gameSlug, year, month, shortHash, safeName)
+	// Final Structure: [prefix/][game-slug/]year/month/[hash/]safe_name
+	var parts []string
+	
+	if prefix != "" {
+		parts = append(parts, prefix)
 	}
 	
-	// For multipart upload where hash isn't known yet, use a timestamp to ensure uniqueness
-	return fmt.Sprintf("%s/%s/%d/%02d/%d_%s", prefix, gameSlug, year, month, time.Now().UnixNano(), safeName)
+	if gameSlug != "" && !isGenericSlug(gameSlug) {
+		parts = append(parts, gameSlug)
+	}
+	
+	parts = append(parts, fmt.Sprintf("%d/%02d", year, month))
+	
+	if shortHash != "" {
+		parts = append(parts, shortHash)
+	} else {
+		parts = append(parts, fmt.Sprintf("%d", time.Now().UnixNano()))
+	}
+	
+	parts = append(parts, safeName)
+
+	return strings.Join(parts, "/")
+}
+
+func isGenericSlug(slug string) bool {
+	lower := strings.ToLower(slug)
+	return lower == "misc" || lower == "unknown" || lower == "pending" || lower == "unnamed-game"
 }
 
 // R2Uploader struct holds the S3 client
