@@ -257,6 +257,7 @@ func main() {
 	config := cors.DefaultConfig()
 	config.AllowOrigins = []string{
 		"http://localhost:3000",
+		"http://localhost:3001",
 		"https://chanomhub.online",
 		"https://chanomhub.com",
 		"https://www.chanomhub.online",
