@@ -46,6 +46,7 @@ var (
 	// --- Domain Mapping Documentation ---
 	// r2PublicURL (Images/Media)       -> cdn.chanomhub.com
 	// r2StoragePublicURL (Game Files)  -> storage.chanomhub.com
+	// r2VideoPublicURL (Videos)        -> vidoes.chanomhub.com
 	// ------------------------------------
 
 	r2AccountID       = getEnv("R2_ACCOUNT_ID", "")
@@ -58,15 +59,11 @@ var (
 	r2StorageBucketName = getEnv("R2_STORAGE_BUCKET_NAME", "")
 	r2StoragePublicURL  = getEnv("R2_STORAGE_PUBLIC_URL", "")
 
-	s3Client          *s3.Client
+	// New video bucket
+	r2VideoBucketName = getEnv("R2_VIDEO_BUCKET_NAME", "")
+	r2VideoPublicURL  = getEnv("R2_VIDEO_PUBLIC_URL", "")
 
-	b2AccountID       = getEnv("B2_ACCOUNT_ID", "")
-	b2AccessKeyID     = getEnv("B2_ACCESS_KEY_ID", "")
-	b2SecretAccessKey = getEnv("B2_SECRET_ACCESS_KEY", "")
-	b2BucketName      = getEnv("B2_BUCKET_NAME", "")
-	b2Endpoint        = getEnv("B2_ENDPOINT", "")
-	b2PublicURL       = getEnv("B2_PUBLIC_URL", "")
-	b2Client          *s3.Client
+	s3Client          *s3.Client
 )
 
 // S3Config helper struct
@@ -89,12 +86,12 @@ func getS3Config(targetBucketType string, isVideo bool) (*S3Config, error) {
 		targetBucket = r2StorageBucketName
 		targetPublicURL = r2StoragePublicURL
 	} else if isVideo {
-		if b2Client == nil {
+		if r2VideoBucketName == "" {
 			return nil, errors.New("video upload service is not configured")
 		}
-		targetClient = b2Client
-		targetBucket = b2BucketName
-		targetPublicURL = b2PublicURL
+		targetClient = s3Client
+		targetBucket = r2VideoBucketName
+		targetPublicURL = r2VideoPublicURL
 	} else {
 		targetClient = s3Client
 		targetBucket = r2BucketName
@@ -178,27 +175,6 @@ func NewR2Uploader() (*R2Uploader, error) {
 	}, nil
 }
 
-// NewB2Uploader creates a new B2 uploader
-func NewB2Uploader() (*R2Uploader, error) {
-	b2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{
-			URL: b2Endpoint,
-		}, nil
-	})
-
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithEndpointResolverWithOptions(b2Resolver),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(b2AccessKeyID, b2SecretAccessKey, "")),
-		config.WithRegion("us-east-1"), // B2 requires a region, often us-east-1 is fine or specific region
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load B2 AWS config: %w", err)
-	}
-
-	return &R2Uploader{
-		Client: s3.NewFromConfig(cfg),
-	}, nil
-}
 
 func main() {
 	// Load .env file
@@ -217,12 +193,8 @@ func main() {
 	r2StorageBucketName = getEnv("R2_STORAGE_BUCKET_NAME", "")
 	r2StoragePublicURL = getEnv("R2_STORAGE_PUBLIC_URL", "")
 
-	b2AccountID = getEnv("B2_ACCOUNT_ID", "")
-	b2AccessKeyID = getEnv("B2_ACCESS_KEY_ID", "")
-	b2SecretAccessKey = getEnv("B2_SECRET_ACCESS_KEY", "")
-	b2BucketName = getEnv("B2_BUCKET_NAME", "")
-	b2Endpoint = getEnv("B2_ENDPOINT", "")
-	b2PublicURL = getEnv("B2_PUBLIC_URL", "")
+	r2VideoBucketName = getEnv("R2_VIDEO_BUCKET_NAME", "")
+	r2VideoPublicURL = getEnv("R2_VIDEO_PUBLIC_URL", "")
 
 	// Check for required environment variables
 	if r2AccountID == "" || r2AccessKeyID == "" || r2SecretAccessKey == "" || r2BucketName == "" || r2PublicURL == "" {
@@ -233,8 +205,8 @@ func main() {
 		log.Fatal("JWT_SECRET is required for security")
 	}
 
-	if b2AccountID == "" || b2AccessKeyID == "" || b2SecretAccessKey == "" || b2BucketName == "" || b2Endpoint == "" || b2PublicURL == "" {
-		log.Println("Warning: Missing required environment variables for B2. Video uploads will not work.")
+	if r2VideoBucketName == "" || r2VideoPublicURL == "" {
+		log.Println("Warning: Missing required environment variables for R2 Video. Video uploads will not work.")
 	}
 
 	uploader, err := NewR2Uploader()
@@ -242,14 +214,6 @@ func main() {
 		log.Fatalf("Failed to create R2 uploader: %v", err)
 	}
 	s3Client = uploader.Client
-
-	if b2AccessKeyID != "" {
-		b2Uploader, err := NewB2Uploader()
-		if err != nil {
-			log.Fatalf("Failed to create B2 uploader: %v", err)
-		}
-		b2Client = b2Uploader.Client
-	}
 
 	router := gin.Default()
 
@@ -592,7 +556,7 @@ func uploadPartHandler(c *gin.Context) {
 
 	isVideo := isVideoStr == "true"
 	// We need the client but we already have the bucket.
-	// We use bucket type to decide which client (R2 or B2).
+	// We use bucket type to decide which client or bucket to use.
 	// For simplicity, we can try to guess from bucket name or just pass bucketType.
 	targetBucketType := c.Query("bucketType")
 	cfg, err := getS3Config(targetBucketType, isVideo)
