@@ -258,9 +258,7 @@ func main() {
 	config.AllowOrigins = []string{
 		"http://localhost:3000",
 		"http://localhost:3001",
-		"https://chanomhub.online",
 		"https://chanomhub.com",
-		"https://www.chanomhub.online",
 		"https://www.chanomhub.com",
 	}
 	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
